@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 
 import logging
-from telegram.ext import Updater, CommandHandler, RegexHandler
-import _thread
 
+from telegram.ext import CommandHandler, RegexHandler, Updater
+
+import _thread
 
 logging.getLogger("telegram").setLevel(logging.ERROR)
 

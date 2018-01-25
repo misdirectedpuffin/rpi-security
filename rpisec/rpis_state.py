@@ -1,18 +1,15 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import time
 from datetime import timedelta
 from threading import Lock
-import time
-
 
 logger = logging.getLogger()
 
 
 class RpisState(object):
-    '''
-    Contains state information about the alarm and handles updates
-    '''
+    """Contains state information about the alarm and handles updates"""
     def __init__(self, rpis):
         self.rpis = rpis
         self.lock = Lock()
@@ -31,7 +28,9 @@ class RpisState(object):
                 self.previous = self.current
                 self.current = new_state
                 self.last_change = time.time()
-                self.rpis.telegram_send_message("rpi-security is now {0}".format(self.current))
+                self.rpis.telegram_send_message(
+                    "rpi-security is now {0}".format(self.current)
+                )
                 logger.info("rpi-security is now {0}".format(self.current))
 
     def update_triggered(self, triggered):
@@ -74,12 +73,12 @@ class RpisState(object):
             "Uptime: _{3}_ \n"
             "Last MAC detected: _{4} {5} ago_ \n"
             "Alarm triggered: _{6}_ \n"
-            ).format(
-                    self.current,
-                    self.previous,
-                    self._get_readable_delta(self.last_change),
-                    self._get_readable_delta(self.start_time),
-                    self.last_mac,
-                    self._get_readable_delta(self.last_packet),
-                    self.triggered
-                )
+        ).format(
+            self.current,
+            self.previous,
+            self._get_readable_delta(self.last_change),
+            self._get_readable_delta(self.start_time),
+            self.last_mac,
+            self._get_readable_delta(self.last_packet),
+            self.triggered
+        )
