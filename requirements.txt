@@ -1,0 +1,9 @@
+configparser==3.5.0
+netaddr==0.7.19
+netifaces==0.10.6
+numpy==1.14.0
+Pillow==5.0.0
+python-telegram-bot==9.0.0
+PyYAML==3.12
+requests==2.18.4
+scapy-python3==0.23
