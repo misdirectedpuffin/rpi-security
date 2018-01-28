@@ -8,7 +8,10 @@ import sys
 import time
 from threading import Thread
 
-import rpisec
+import security
+from security.camera import Camera
+from security.network import Network
+from security.util import exit_error, exit_clean, exception_handler
 
 
 def parse_arguments():
@@ -74,61 +77,61 @@ if __name__ == "__main__":
     logger = setup_logging(debug_mode=False, log_to_stdout=args.debug)
 
     try:
-        rpis = rpisec.RpisSecurity(args.config_file, args.data_file)
-        camera = rpisec.RpisCamera(
-            rpis.photo_size,
-            rpis.gif_size,
-            rpis.motion_size,
-            rpis.camera_vflip,
-            rpis.camera_hflip,
-            rpis.motion_detection_setting,
-            rpis.camera_capture_length,
-            rpis.camera_mode
+        network = Network(args.config_file, args.data_file)
+        camera = Camera(
+            network.photo_size,
+            network.gif_size,
+            network.motion_size,
+            network.camera_vflip,
+            network.camera_hflip,
+            network.motion_detection_setting,
+            network.camera_capture_length,
+            network.camera_mode
         )
-        if rpis.debug_mode:
+        if network.debug_mode:
             logger.handlers[0].setLevel(logging.DEBUG)
     except Exception as exc:
-        rpisec.exit_error('Configuration error: {0}'.format(repr(exc)))
+        exit_error('Configuration error: {0}'.format(repr(exc)))
 
-    sys.excepthook = rpisec.exception_handler
+    sys.excepthook = exception_handler
 
     # Start the threads
     telegram_bot_thread = Thread(
         name='telegram_bot',
-        target=rpisec.threads.telegram_bot,
-        args=(rpis, camera)
+        target=security.threads.telegram_bot,
+        args=(security, camera)
     )
     telegram_bot_thread.daemon = True
     telegram_bot_thread.start()
 
     monitor_alarm_state_thread = Thread(
         name='monitor_alarm_state',
-        target=rpisec.threads.monitor_alarm_state,
-        args=(rpis, camera)
+        target=security.threads.monitor_alarm_state,
+        args=(security, camera)
     )
     monitor_alarm_state_thread.daemon = True
     monitor_alarm_state_thread.start()
 
     capture_packets_thread = Thread(
         name='capture_packets',
-        target=rpisec.threads.capture_packets,
-        args=(rpis,)
+        target=security.threads.capture_packets,
+        args=(security,)
     )
     capture_packets_thread.daemon = True
     capture_packets_thread.start()
 
     process_photos_thread = Thread(
         name='process_photos',
-        target=rpisec.threads.process_photos,
-        args=(rpis, camera)
+        target=security.threads.process_photos,
+        args=(security, camera)
     )
     process_photos_thread.daemon = True
     process_photos_thread.start()
-    signal.signal(signal.SIGTERM, rpisec.exit_clean)
+    signal.signal(signal.SIGTERM, exit_clean)
     try:
         logger.info("rpi-security running")
-        rpis.telegram_send_message('rpi-security running')
+        network.telegram_send_message('rpi-security running')
         while True:
             time.sleep(100)
     except KeyboardInterrupt:
-        rpisec.exit_clean()
+        exit_clean()

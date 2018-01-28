@@ -8,10 +8,10 @@ from threading import Lock
 logger = logging.getLogger()
 
 
-class RpisState(object):
+class State(object):
     """Contains state information about the alarm and handles updates"""
-    def __init__(self, rpis):
-        self.rpis = rpis
+    def __init__(self, network):
+        self.network = network
         self.lock = Lock()
         self.start_time = time.time()
         self.current = 'disarmed'
@@ -28,7 +28,7 @@ class RpisState(object):
                 self.previous = self.current
                 self.current = new_state
                 self.last_change = time.time()
-                self.rpis.telegram_send_message(
+                self.network.telegram_send_message(
                     "rpi-security is now {0}".format(self.current)
                 )
                 logger.info("rpi-security is now {0}".format(self.current))
@@ -56,11 +56,11 @@ class RpisState(object):
         if self.current == 'disabled':
             return
         now = time.time()
-        if now - self.last_packet > (self.rpis.packet_timeout + 20):
+        if now - self.last_packet > (self.network.packet_timeout + 20):
             self.update_state('armed')
-        elif now - self.last_packet > self.rpis.packet_timeout:
+        elif now - self.last_packet > self.network.packet_timeout:
             logger.debug("Running arp_ping_macs before arming...")
-            self.rpis.arp_ping_macs()
+            self.network.arp_ping_macs()
         else:
             self.update_state('disarmed')
 

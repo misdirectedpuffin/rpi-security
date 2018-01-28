@@ -14,7 +14,7 @@ scapy_conf.sniff_promisc=0
 logger = logging.getLogger()
 
 
-def capture_packets(rpis):
+def capture_packets(network):
     """
     This function uses scapy to sniff packets for our MAC addresses and updates
     the alarm state when packets are detected.
@@ -22,9 +22,9 @@ def capture_packets(rpis):
     logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 
     def update_time(packet):
-        packet_mac = set(rpis.mac_addresses) & set([packet[0].addr2, packet[0].addr3])
+        packet_mac = set(network.mac_addresses) & set([packet[0].addr2, packet[0].addr3])
         packet_mac_str = list(packet_mac)[0]
-        rpis.state.update_last_mac(packet_mac_str)
+        network.state.update_last_mac(packet_mac_str)
         logger.debug('Packet detected from {0}'.format(packet_mac_str))
 
     def calculate_filter(mac_addresses):
@@ -35,12 +35,12 @@ def capture_packets(rpis):
             'or (wlan addr1 {1} '
             'and wlan addr3 ({0}))'
         )
-        return filter_text.format(mac_string, rpis.my_mac_address)
+        return filter_text.format(mac_string, network.my_mac_address)
 
     while True:
         logger.info("thread running")
         try:
-            sniff(iface=rpis.network_interface, store=0, prn=update_time, filter=calculate_filter(rpis.mac_addresses))
+            sniff(iface=network.network_interface, store=0, prn=update_time, filter=calculate_filter(network.mac_addresses))
         except Exception as e:
             logger.error('Scapy failed to sniff packets with error {0}'.format(repr(e)))
             _thread.interrupt_main()
