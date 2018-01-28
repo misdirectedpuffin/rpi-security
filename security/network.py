@@ -7,7 +7,7 @@ import time
 from configparser import SafeConfigParser
 
 import yaml
-from netaddr import IPNetwork
+from netaddr import IPNetworkInterface
 from scapy.all import ARP, Ether, srp
 from telegram import Bot as TelegramBot
 
@@ -23,7 +23,7 @@ logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 logger = logging.getLogger()
 
 
-class Network(object):
+class NetworkInterface(object):
     """Reads and processed configuration, checks system settings."""
     default_config = {
         'camera_save_path': '/var/tmp',
@@ -41,10 +41,16 @@ class Network(object):
         'camera_capture_length': '3'
     }
 
-    def __init__(self, config_file, data_file):
+    def __init__(self, config_file, data_file, interface='wlan0'):
         self.config_file = config_file
         self.data_file = data_file
+        # self.network_interface = network_interface
         self.saved_data = self._read_data_file()
+        self.interface = interface
+
+        self._interface_mac_addr = None
+        self._is_monitor_mode = None
+        self._network_address = None
         self._parse_config_file()
         self._check_system()
         self.state = State(self)
@@ -67,58 +73,6 @@ class Network(object):
         else:
             logger.debug('Data file read: {0}'.format(self.data_file))
         return result
-
-    def arp_ping_macs(self, repeat=4):
-        """Performs an ARP scan of a destination MAC address
-
-        Determines if the MAC addresses are present on the network.
-        """
-
-        def _arp_ping(mac_address):
-            result = False
-            answered, unanswered = srp(Ether(dst=mac_address)/ARP(pdst=self.network_address), timeout=1, verbose=False)
-            if len(answered) > 0:
-                for reply in answered:
-                    if reply[1].hwsrc == mac_address:
-                        if type(result) is not list:
-                            result = []
-                        result.append(str(reply[1].psrc))
-                        result = ', '.join(result)
-            return result
-        while repeat > 0:
-            for mac_address in self.mac_addresses:
-                result = _arp_ping(mac_address)
-                if result:
-                    logger.debug(
-                        'MAC %s responded to ARP ping with address %s',
-                        mac_address,
-                        result
-                    )
-                    break
-                else:
-                    logger.debug(
-                        'MAC %s did not respond to ARP ping',
-                        mac_address
-                    )
-            if repeat > 1:
-                time.sleep(2)
-            repeat -= 1
-
-    def save_telegram_chat_id(self, chat_id):
-        """Saves the telegram chat ID to the data file."""
-        try:
-            # Use a lock here?
-            self.saved_data['telegram_chat_id'] = chat_id
-            with open(self.data_file, 'w') as f:
-                yaml.dump({'telegram_chat_id': chat_id}, f, default_flow_style=False)
-        except Exception as exc:
-            logger.error(
-                'Failed to write state file %s: %s',
-                self.data_file,
-                exc
-            )
-        else:
-            logger.debug('State file written: %s', self.data_file)
 
     def _parse_config_file(self):
         def _str2bool(v):
@@ -143,145 +97,151 @@ class Network(object):
         self.packet_timeout = int(self.packet_timeout)
         self.mac_addresses = self.mac_addresses.lower().split(',')
 
+    def _arp_ping(self, mac_address):
+        result = False
+        answered, unanswered = srp(
+            Ether(
+                dst=mac_address
+                )/ARP(pdst=self.network_address),
+                timeout=1,
+                verbose=False
+        )
+        if len(answered) > 0:
+            for reply in answered:
+                if reply[1].hwsrc == mac_address:
+                    if type(result) is not list:
+                        result = []
+                    result.append(str(reply[1].psrc))
+                    result = ', '.join(result)
+        return result
+
+    def arp_ping_macs(self, mac_address, repeat=4):
+        """Performs an ARP scan of a destination MAC address
+
+        Determines if the MAC addresses are present on the network.
+        """
+        while repeat > 0:
+            for mac_address in self.mac_addresses:
+                result = self._arp_ping(mac_address)
+                if result:
+                    logger.debug(
+                        'MAC %s responded to ARP ping with address %s',
+                        mac_address,
+                        result
+                    )
+                    break
+                else:
+                    logger.debug(
+                        'MAC %s did not respond to ARP ping',
+                        mac_address
+                    )
+            if repeat > 1:
+                time.sleep(2)
+            repeat -= 1
+
     def _check_system(self):
         if not os.geteuid() == 0:
             exit_error('{0} must be run as root'.format(sys.argv[0]))
 
-        if not self._check_monitor_mode():
+        if not self.is_monitor_mode():
             message = (
                 'Monitor mode is not enabled for interface {0} '
                 'or interface does not exist'
             )
             raise Exception(message.format(self.network_interface))
 
-        self._set_interface_mac_addr()
-        self._set_network_address()
+        # self._set_interface_mac_addr()
+        # self._set_network_address()
 
-    def _check_monitor_mode(self):
+
+    @property
+    def is_valid(self):
+        path = '/sys/class/net/{0}/type'.format(self.interface)
+        try:
+            with open(path, 'r') as type_file:
+                content = type_file.read()
+        except FileNotFoundError as exc:
+            logger.exception(exc)
+        else:
+            return content.startswith('80')
+
+    @property
+    def is_operational(self):
+        """Check that the interface is not 'down'."""
+        path = '/sys/class/net/{0}/operstate'.format(self.interface)
+        try:
+            with open(path, 'r') as operdata:
+                content = operdata.read()
+        except FileNotFoundError as exc:
+            logger.exception(exc)
+        else:
+            return content.startswith('down')
+    
+    @property
+    def is_monitor_mode(self):
         """
         Returns True if an interface is in monitor mode
         """
-        result = False
-        try:
-            type_file = open('/sys/class/net/{0}/type'.format(self.network_interface), 'r')
-            operdata_file = open('/sys/class/net/{0}/operstate'.format(self.network_interface), 'r')
-        except:
-            pass
-        else:
-            if type_file.read().startswith('80') and not operdata_file.read().startswith('down'):
-                result = True
-        return result
+        if self._is_monitor_mode is None:
+            self._is_monitor_mode = all([
+                self.is_operational,
+                self.is_valid
+            ])
+        return self._is_monitor_mode
 
-    def _set_interface_mac_addr(self):
+    @property
+    def interface_mac_addr(self):
         """
         Gets the MAC address of an interface
         """
-        try:
-            with open('/sys/class/net/{0}/address'.format(self.network_interface), 'r') as f:
-                self.my_mac_address = f.read().strip()
-        except FileNotFoundError:
-            raise Exception('Interface {0} does not exist'.format(self.network_interface))
-        except Exception:
-            raise Exception('Unable to get MAC address for interface {0}'.format(self.network_interface))
+        if self._interface_mac_addr is None:
+            try:
+                interface_path = '/sys/class/net/{0}/address'.format(
+                    self.network_interface)
 
-    def _set_network_address(self):
+                with open(interface_path, 'r') as f:
+                    self._interface_mac_addr = f.read().strip()
+            except FileNotFoundError:
+                raise Exception('Interface {0} does not exist'.format(self.network_interface))
+            except Exception:
+                raise Exception('Unable to get MAC address for interface {0}'.format(self.network_interface))
+        return self._interface_mac_addr
+
+
+    @property
+    def network_address(self):
         """
         Finds the corresponding normal interface for a monitor interface and
         then calculates the subnet address of this interface
         """
-        for interface in os.listdir('/sys/class/net'):
-            if interface in ['lo', self.network_interface]:
-                continue
-            try:
-                with open('/sys/class/net/{0}/address'.format(interface), 'r') as f:
-                    interface_mac_address = f.read().strip()
-            except:
-                pass
-            else:
-                if interface_mac_address == self.my_mac_address:
-                    interface_details = ifaddresses(interface)
-                    my_network = IPNetwork(
-                        '{0}/{1}'.format(
-                            interface_details[2][0]['addr'],
-                            interface_details[2][0]['netmask']
+        if self._network_address is None:
+            for interface in os.listdir('/sys/class/net'):
+                if interface in ['lo', self.interface]:
+                    continue
+                try:
+                    with open('/sys/class/net/{0}/address'.format(interface), 'r') as f:
+                        interface_mac_address = f.read().strip()
+                except:
+                    pass
+                else:
+                    if interface_mac_address == self.interface_mac_addr:
+                        interface_details = ifaddresses(interface)
+                        my_network = IPNetworkInterface(
+                            '{0}/{1}'.format(
+                                interface_details[2][0]['addr'],
+                                interface_details[2][0]['netmask']
+                            )
                         )
-                    )
-                    network_address = my_network.cidr
-                    logger.debug(
-                        'Calculated network {0} from interface {1}',
-                        network_address,
-                        interface
-                    )
-                    self.network_address = str(network_address)
-        if not hasattr(self, 'network_address'):
-            message = 'Unable to get network address for interface {0}'.format(
-                self.network_interface
-            )
-            raise Exception(message)
+                        network_address = my_network.cidr
+                        logger.debug(
+                            'Calculated network %s from interface %s',
+                            network_address,
+                            interface
+                        )
+                        self.network_address = str(network_address)
+            if not hasattr(self, 'network_address'):
+                message = 'Unable to get network address for interface {0}'.format(
+                    self.interface
+                )
+                raise Exception(message)
 
-    def telegram_send_message(self, message):
-        if 'telegram_chat_id' not in self.saved_data or self.saved_data['telegram_chat_id'] is None:
-            logger.error(
-                'Telegram failed to send message because '
-                'Telegram chat_id is not set. '
-                'Send a message to the Telegram bot'
-            )
-            return False
-        try:
-            self.bot.sendMessage(
-                chat_id=self.saved_data['telegram_chat_id'],
-                parse_mode='Markdown',
-                text=message,
-                timeout=10
-            )
-        except Exception as e:
-            logger.error(
-                'Telegram failed to send message "%s", exc: %s',
-                message,
-                e
-            )
-        else:
-            logger.info('Telegram message Sent: "%s"', message)
-            return True
-
-    def telegram_send_file(self, file_path):
-        if 'telegram_chat_id' not in self.saved_data:
-            logger.error(
-                'Telegram failed to send file %s because '
-                'chat_id is not set. '
-                'Send a message to the Telegram bot',
-                file_path
-            )
-            return False
-        filename, file_extension = os.path.splitext(file_path)
-        try:
-            if file_extension == '.mp4':
-                self.bot.sendVideo(
-                    chat_id=self.saved_data['telegram_chat_id'],
-                    video=open(file_path, 'rb'),
-                    timeout=30
-                )
-            elif file_extension == '.gif':
-                self.bot.sendDocument(
-                    chat_id=self.saved_data['telegram_chat_id'],
-                    document=open(file_path, 'rb'),
-                    timeout=30
-                )
-            elif file_extension == '.jpeg':
-                self.bot.sendPhoto(
-                    chat_id=self.saved_data['telegram_chat_id'],
-                    photo=open(file_path, 'rb'),
-                    timeout=10
-                )
-            else:
-                logger.error('Uknown file not sent: %s', file_path)
-        except Exception as exc:
-            logger.error(
-                'Telegram failed to send file %s, exc: %s',
-                file_path,
-                exc
-            )
-            return False
-        else:
-            logger.info('Telegram file sent: %s', file_path)
-            return True
