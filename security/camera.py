@@ -18,7 +18,7 @@ from .exit_clean import exit_error
 logger = logging.getLogger()
 
 
-class RpisCamera(object):
+class Camera(object):
     """A wrapper for the camera.
 
     Runs motion detection, provides a queue for photos, captues photos and GIFs.

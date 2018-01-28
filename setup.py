@@ -13,10 +13,10 @@ setup(
     ),
     long_description=open('README.md', encoding='utf-8').read(),
     packages=[
-        'rpisec',
-        'rpisec/threads'
+        'security',
+        'security/threads'
     ],
-    scripts=['bin/rpi-security.py'],
+    scripts=['bin/manage.py'],
     data_files=[
         ('/lib/systemd/system', ['etc/rpi-security.service']),
         ('/etc', ['etc/rpi-security.conf']),

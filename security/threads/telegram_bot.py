@@ -12,20 +12,20 @@ logging.getLogger("telegram").setLevel(logging.ERROR)
 logger = logging.getLogger()
 
 
-def telegram_bot(rpis, camera):
+def telegram_bot(network, camera):
     """
     This function runs the telegram bot that responds to commands like /enable, /disable or /status.
     """
     def save_chat_id(bot, update):
-        if 'telegram_chat_id' not in rpis.saved_data or rpis.saved_data['telegram_chat_id'] is None:
-            rpis.save_telegram_chat_id(update.message.chat_id)
+        if 'telegram_chat_id' not in network.saved_data or network.saved_data['telegram_chat_id'] is None:
+            network.save_telegram_chat_id(update.message.chat_id)
             logger.debug('Set Telegram chat_id {0}'.format(update.message.chat_id))
 
     def debug(bot, update):
         logger.debug('Received Telegram bot message: {0}'.format(update.message.text))
 
     def check_chat_id(update):
-        if 'telegram_chat_id' in rpis.saved_data and update.message.chat_id != rpis.saved_data['telegram_chat_id']:
+        if 'telegram_chat_id' in network.saved_data and update.message.chat_id != network.saved_data['telegram_chat_id']:
             logger.debug('Ignoring Telegam update with filtered chat id {0}: {1}'.format(update.message.chat_id, update.message.text))
             return False
         else:
@@ -37,31 +37,31 @@ def telegram_bot(rpis, camera):
 
     def status(bot, update):
         if check_chat_id(update):
-            bot.sendMessage(update.message.chat_id, parse_mode='Markdown', text=rpis.state.generate_status_text(), timeout=10)
+            bot.sendMessage(update.message.chat_id, parse_mode='Markdown', text=network.state.generate_status_text(), timeout=10)
 
     def disable(bot, update):
         if check_chat_id(update):
-            rpis.state.update_state('disabled')
+            network.state.update_state('disabled')
 
     def enable(bot, update):
         if check_chat_id(update):
-            rpis.state.update_state('disarmed')
+            network.state.update_state('disarmed')
 
     def photo(bot, update):
         if check_chat_id(update):
             photo = camera.take_photo()
-            rpis.telegram_send_file(photo)
+            network.telegram_send_file(photo)
 
     def gif(bot, update):
         if check_chat_id(update):
             gif = camera.take_gif()
-            rpis.telegram_send_file(gif)
+            network.telegram_send_file(gif)
 
     def error_callback(bot, update, error):
         logger.error('Update "{0}" caused error "{1}"'.format(update, error))
 
     try:
-        updater = Updater(rpis.telegram_bot_token)
+        updater = Updater(network.telegram_bot_token)
         dp = updater.dispatcher
         dp.add_handler(RegexHandler('.*', save_chat_id), group=1)
         dp.add_handler(RegexHandler('.*', debug), group=2)

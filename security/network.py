@@ -14,7 +14,7 @@ from telegram import Bot as TelegramBot
 from netifaces import ifaddresses
 
 from .exit_clean import exit_error
-from .rpis_state import RpisState
+from .security.state import State
 
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 
@@ -23,7 +23,7 @@ logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 logger = logging.getLogger()
 
 
-class RpisSecurity(object):
+class Network(object):
     """Reads and processed configuration, checks system settings."""
     default_config = {
         'camera_save_path': '/var/tmp',
@@ -47,7 +47,7 @@ class RpisSecurity(object):
         self.saved_data = self._read_data_file()
         self._parse_config_file()
         self._check_system()
-        self.state = RpisState(self)
+        self.state = State(self)
 
         try:
             self.bot = TelegramBot(token=self.telegram_bot_token)
