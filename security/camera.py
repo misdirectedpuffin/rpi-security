@@ -11,182 +11,294 @@ import numpy as np
 from PIL import Image
 
 from picamera import PiCamera
+from picamera.exc import PiCameraNotRecording
 from picamera.array import PiMotionAnalysis
 
-from .exit_clean import exit_error
 
 logger = logging.getLogger()
 
+TIMESTAMP_FORMAT = '%Y-%m-%d-%H%M%S'
 
-class Camera(object):
+
+def queue_captured(func):
+    """Decorator to put the captured images on a queue."""
+    def wrapper(*args):
+        """Wrapper to return the function"""
+        queue = args[0].queue # self.queue
+        captured = func(*args)
+        for capture in captured:
+            queue.put(captured)
+        return captured
+
+    return wrapper
+
+
+def log(func):
+    """Decorator to log exceptions."""
+    def wrapper(*args):
+        """Wrapper to return the function."""
+        try:
+            result = func(*args)
+        except Exception as exc:
+            logger.exception(
+                'Exception raised in %s. Traceback: %s',
+                func.__name__,
+                str(exc)
+            )
+            return
+        else:
+            logger.info('%s: %s', func.__name__, result)
+            return result
+
+
+def pause_record(func):
+    """Pause recording before a method and start afterward."""
+
+    def wrapper(self):
+        """Inner wrapper."""
+        if self.camera.recording:
+            self.camera.wait_recording(0.1)
+        try:
+            response = func(self)
+        except Exception as exc:
+            logger.error('Error in start_motion_detection: %s', exc)
+        finally:
+            self.camera.start_recording(
+                os.devnull,
+                format='h264',
+                motion_output=self
+            )
+        return response
+
+    return wrapper
+
+
+def settle_time(func):
+    """Check if `settle time` has been reached."""
+
+    def wrapper(self):
+        """Internal wrapper."""
+        if (time.time() - self.motion_detection_started) < self.motion_settle_time:
+            logger.debug('Ignoring initial motion due to settle time')
+            return
+        func(self)
+    return wrapper
+
+
+class MotionDetector(PiMotionAnalysis):
+    """Extend PiMotionAnalysis with custom analysis method."""
+
+    camera_trigger = Event()
+
+    def __init__(self, camera, size=None):
+        super(MotionDetector, self).__init__(camera, size)
+        self.motion_magnitude = 60
+        self.motion_vectors = 10
+        self.motion_settle_time = 1
+        self.motion_detection_started = 0
+
+        self.camera.framerate = self.motion_framerate
+        exposure_speed = self.camera.exposure_speed
+        self.camera.shutter_speed = exposure_speed
+        self.camera.awb_mode = 'off'
+        self.camera.exposure_mode = 'off'
+
+    @log
+    @pause_record
+    def start_motion_detection(self):
+        """Begin motion detection."""
+        logger.debug('Starting motion detection')
+        self.set_motion_settings()
+        self.motion_detection_started = time.time()
+
+    @settle_time
+    def analyse(self, a):
+        """Motion detection algorithm taken from docs.
+
+        https://picamera.readthedocs.io/en/release-1.10/api_array.html#picamera.array.PiMotionAnalysis
+        """
+        a = np.sqrt(
+            np.square(a['x'].astype(np.float)) +
+            np.square(a['y'].astype(np.float))
+        ).clip(0, 255).astype(np.uint8)
+
+        vector_count = (a > self.motion_magnitude).sum()
+        if vector_count > self.motion_vectors:
+            logger.info(
+                'Motion detected. Vector count: %s. Threshold: %s',
+                vector_count,
+                self.motion_vectors
+            )
+            # Set flag=True. Notify all threads.
+            self.camera_trigger.set()
+
+
+class Camera(PiCamera):
     """A wrapper for the camera.
 
     Runs motion detection, provides a queue for photos, captues photos and GIFs.
+    Default resolution is 1280x720. Original code has it as 1024x768.
     """
 
-    def __init__(self, photo_size, gif_size, motion_size, camera_vflip,
-                 camera_hflip, motion_detection_setting, camera_capture_length,
-                 camera_mode):
+    def __init__(
+            self,
+            framerate=5,
+            resolution='1024x768',  # auto set to 1280 x 720 if None
+            # capture_length='3',
+            camera_mode='gif',
+            photo_size='1024x768',
+            # gif_size='1024x768',
+            temp_directory='/var/tmp',
+            images_directory='/var/tmp'
+    ):
+        super(Camera, self).__init__(framerate=framerate, resolution=resolution)
+
         self.photo_size = photo_size
-        self.gif_size = gif_size
-        self.camera_vflip = camera_vflip
-        self.camera_hflip = camera_hflip
+        # self.gif_size = gif_size
+        # self.capture_length = capture_length
+        self.camera_mode = camera_mode
+        self.temp_directory = temp_directory
+        self.images_directory = images_directory
+
         self.lock = Lock()
         self.queue = Queue()
-        self.motion_magnitude = motion_detection_setting[0]
-        self.motion_vectors = motion_detection_setting[1]
-        self.motion_framerate = 5
-        self.motion_size = motion_size
-        self.temp_directory = '/var/tmp'
-        self.camera_save_path = '/var/tmp'
-        self.camera_capture_length = camera_capture_length
-        self.camera_mode = camera_mode
 
-        try:
-            self.camera = PiCamera()
-            self.camera.vflip = self.camera_vflip
-            self.camera.hflip = self.camera_hflip
-            self.camera.led = False
-        except Exception as e:
-            exit_error(
-                'Camera module failed to intialise with error {0}'.format(repr(e)))
+    def create_image_path(self, timestamp, prefix='security', name=None, file_suffix='.jpg'):
+        """Create the location on disk to store the captured image."""
+        # timestamp = datetime.now().strftime(TIMESTAMP_FORMAT)
+        if prefix == name:
+            prefix = None
 
-        self.motion_detector = self.MotionDetector(self.camera)
-        self.motion_detector.motion_magnitude = self.motion_magnitude
-        self.motion_detector.motion_vectors = self.motion_vectors
-
-    class MotionDetector(PiMotionAnalysis):
-        camera_trigger = Event()
-        motion_magnitude = 60
-        motion_vectors = 10
-        motion_settle_time = 1
-        motion_detection_started = 0
-
-        def motion_detected(self, vector_count):
-            if time.time() - self.motion_detection_started < self.motion_settle_time:
-                logger.debug('Ignoring initial motion due to settle time')
-                return
-            logger.info('Motion detected. Vector count: {0}. Threshold: {1}'.format(
-                vector_count, self.motion_vectors))
-            self.camera_trigger.set()
-
-        def analyse(self, a):
-            a = np.sqrt(
-                np.square(a['x'].astype(np.float)) +
-                np.square(a['y'].astype(np.float))
-            ).clip(0, 255).astype(np.uint8)
-            vector_count = (a > self.motion_magnitude).sum()
-            if vector_count > self.motion_vectors:
-                self.motion_detected(vector_count)
-
-    def take_photo(self, filename_extra_suffix=''):
-        """Captures a photo and saves it disk."""
-        timestamp = datetime.now().strftime('%Y-%m-%d-%H%M%S')
-        photo = '{0}/rpi-security-{1}{2}.jpeg'.format(
-            self.camera_save_path, timestamp, filename_extra_suffix)
-        try:
-            self.set_normal_settings()
-            with self.lock:
-                while self.camera.recording:
-                    time.sleep(0.1)
-                time.sleep(2)
-                self.camera.resolution = self.photo_size
-                self.camera.capture(photo, use_video_port=False)
-        except Exception as exc:
-            logger.error('Failed to take photo: {0}'.format(repr(exc)))
-            return None
-        else:
-            logger.info('Captured image: {0}'.format(photo))
-            return photo
-
-    def take_gif(self):
-        """Take a gif."""
-        timestamp = datetime.now().strftime('%Y-%m-%d-%H%M%S')
-        gif = '{0}/rpi-security-{1}.gif'.format(
-            self.camera_save_path,
-            timestamp
+        return os.path.join(
+            self.images_directory,
+            self._make_filename(
+                timestamp,
+                prefix=prefix,
+                name=name,
+                file_suffix=file_suffix
+            )
         )
-        temp_jpeg_path = '{0}/rpi-security-{1}-gif-part'.format(
-            self.temp_directory,
-            timestamp
-        )
-        jpeg_files = ['{0}-{1}.jpg'.format(temp_jpeg_path, i)
-                      for i in range(self.camera_capture_length * 3)]
-        try:
-            self.set_normal_settings()
-            for jpeg in jpeg_files:
-                with self.lock:
-                    while self.camera.recording:
-                        time.sleep(0.1)
-                    self.camera.resolution = self.gif_size
-                    self.camera.capture(jpeg)
-            im = Image.open(jpeg_files[0])
-            jpeg_files_no_first_frame = [
-                x for x in jpeg_files if x != jpeg_files[0]]
-            ims = [Image.open(i) for i in jpeg_files_no_first_frame]
-            im.save(gif, append_images=ims,
-                    save_all=True, loop=0, duration=200)
-            for jpeg in jpeg_files:
-                os.remove(jpeg)
-        except Exception as e:
-            logger.error('Failed to create GIF: {0}'.format(repr(e)))
-            return None
-        else:
-            logger.info('Captured gif: {0}'.format(gif))
-            return gif
 
-    def trigger_camera(self):
-        """Capture image."""
+    def _make_filename(self, timestamp, prefix=None, name=None, file_suffix='.jpg'):
+        """Return the correct filename.
+
+        Args:
+            timestamp (str): timestamp as a string.
+            prefix (str): A prefix before the file name.
+            name (str): The file name
+        Returns:
+            A filename with .jpg suffix.
+        """
+        parts = [part for part in (timestamp, prefix, name) if part is not None]
+        return '-'.join(parts) + (file_suffix or '')
+
+    @log
+    def capture_image(self, timestamp, name=None):
+        """Captures an image and saves it to disk."""
+        image_path = self.create_image_path(timestamp, name=name)
+        with self.lock:
+            while self.recording:
+                time.sleep(0.1)
+            time.sleep(2)
+            self.capture(image_path, use_video_port=False)
+        return image_path
+
+    def create_jpg_paths(self, path, capture_length=3):
+        """Yield numbered paths.
+
+        Args:
+            path (str): The absolute file path to enumerate.
+        Yield:
+            (str): A numbered formatted string.
+        """
+        for i in range(capture_length * 3):
+            yield '{path}-{count}'.format(path=path, count=i)
+
+    def save_gif(self, first, rest, timestamp=None):
+        """Create a gif from a series of images (jpg)
+
+        Args:
+            first (str): The path to the first image in the series.
+            rest (list): A list of paths to the remaining images.
+            timestamp (str): A string representing the current date and
+                time.
+        Returns: None
+        """
+
+        # Create a new path to store a .gif
+        if timestamp is None:
+            date_time = datetime.utcnow()
+
+        timestamp = date_time.strftime(TIMESTAMP_FORMAT)
+        gif_path = self.create_image_path(timestamp, file_suffix='.gif')
+
+        first_jpg = Image.open(first)
+        return first_jpg.save(
+            gif_path,
+            append_images=[Image.open(path) for path in rest],
+            save_all=True,
+            loop=0,
+            duration=200
+        )
+
+    def capture_to_path(self, path):
+        """Capture an image from the camera to the current path.
+
+        Args:
+            path (str): The path to capture to.
+
+        Returns: None
+        """
+        while self.recording:
+            time.sleep(0.1)
+        self.capture(path)
+
+    @log
+    def create_gif(self, timestamp, capture_length=3):
+        """Create a gif from a series of jpg files
+
+        Args:
+            timestamp (str): A string in the form `TIMESTAMP_FORMAT`
+        """
+        prepared_paths = [self.create_image_path(timestamp, name=i) for i in range(capture_length * 3)]
+        paths = self.capture_sequence(prepared_paths)
+
+        with self.lock:
+            for path in paths:
+                self.capture_to_path(path)
+
+        # # Remove the unused jpg paths.
+        # for jpeg in jpg_paths:
+        #     os.remove(jpeg)
+
+    @queue_captured
+    def trigger_camera(self, timestamp, capture_length=3):
+        """Capture image.
+
+        Args:
+            timestamp (str): Timestamp in format '%Y-%m-%d-%H%M%S'
+        """
         if self.camera_mode == 'gif':
-            captured = self.take_gif()
-            self.queue.put(captured)
+            captured = self.create_gif(timestamp)
+
         elif self.camera_mode == 'photo':
-            for i in range(0, self.camera_capture_length, 1):
-                captured = self.take_photo(
-                    filename_extra_suffix='-{0}'.format(i))
-                self.queue.put(captured)
+            for i in range(capture_length):
+                captured = self.capture_image(timestamp, name=i)
+
         else:
-            logger.error('Unsupported camera_mode: {0}'.format(self.camera_mode))
+            logger.error('Unsupported camera_mode: %s', self.camera_mode)
+        return captured
 
-    def set_normal_settings(self):
-        self.camera.awb_mode = 'auto'
-        self.camera.exposure_mode = 'auto'
-
-    def set_motion_settings(self):
-        self.camera.resolution = self.motion_size
-        self.camera.framerate = self.motion_framerate
-        exposure_speed = self.camera.exposure_speed
-        awb_gains = self.camera.awb_gains
-        self.camera.shutter_speed = exposure_speed
-        self.camera.awb_mode = 'off'
-        self.camera.awb_gains = awb_gains
-        self.camera.exposure_mode = 'off'
-
-    def start_motion_detection(self):
-        """Pause camera recording."""
-        try:
-            if self.camera.recording:
-                self.camera.wait_recording(0.1)
-            else:
-                logger.debug('Starting motion detection')
-                self.set_motion_settings()
-                self.motion_detector.motion_detection_started = time.time()
-                self.camera.start_recording(
-                    os.devnull, format='h264', motion_output=self.motion_detector)
-        except Exception as exc:
-            logger.error(
-                'Error in start_motion_detection: {0}'.format(repr(exc)))
-
-    def stop_motion_detection(self):
+    @log
+    def end_recording(self):
         """Stop the camera from recording."""
         try:
-            if not self.camera.recording:
-                return
-            else:
-                logger.debug('Stopping motion detection')
-                self.camera.stop_recording()
-        except Exception as exc:
-            logger.error('Error in stop_motion_detection: {0}'.format(repr(exc)))
+            logger.debug('Stopping recording.')
+            self.stop_recording()
+        except PiCameraNotRecording as exc:
+            logger.warning(str(exc))
+            return
+
 
     def clear_queue(self):
         with self.queue.mutex:
