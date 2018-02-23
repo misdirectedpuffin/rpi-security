@@ -3,6 +3,7 @@
 import logging
 import os
 import time
+from configparser import SafeConfigParser
 from datetime import datetime
 from queue import Queue
 from threading import Event, Lock
@@ -11,9 +12,8 @@ import numpy as np
 from PIL import Image
 
 from picamera import PiCamera
-from picamera.exc import PiCameraNotRecording
 from picamera.array import PiMotionAnalysis
-
+from picamera.exc import PiCameraNotRecording
 
 logger = logging.getLogger()
 
@@ -143,25 +143,28 @@ class Camera(PiCamera):
     def __init__(
             self,
             framerate=5,
-            resolution='1024x768',  # auto set to 1280 x 720 if None
-            # capture_length='3',
-            camera_mode='gif',
-            photo_size='1024x768',
-            # gif_size='1024x768',
+            resolution=(1024, 768),  # auto set to 1280 x 720 if None
             temp_directory='/var/tmp',
             images_directory='/var/tmp'
     ):
         super(Camera, self).__init__(framerate=framerate, resolution=resolution)
 
-        self.photo_size = photo_size
-        # self.gif_size = gif_size
-        # self.capture_length = capture_length
-        self.camera_mode = camera_mode
+        self.camera_mode = 'gif'.lower()
+        self.photo_size = (1024, 768)
+        self.gif_size = (1024, 768)
+        self.motion_size = (1024, 768)
+        self.motion_detection_setting = (60, 10)
+        self.vflip = False
+        self.hflip = False
+        self.debug_mode = False
+        self.pir_pin = 14
+        self.capture_length = 3
         self.temp_directory = temp_directory
         self.images_directory = images_directory
 
         self.lock = Lock()
         self.queue = Queue()
+
 
     def create_image_path(self, timestamp, prefix='security', name=None, file_suffix='.jpg'):
         """Create the location on disk to store the captured image."""
@@ -303,3 +306,36 @@ class Camera(PiCamera):
     def clear_queue(self):
         with self.queue.mutex:
             self.queue.queue.clear()
+
+    def process_photos(self, network):
+        """
+        Monitors the captured_from_camera list for newly captured photos.
+        When a new photos are present it will run arp_ping_macs to remove
+        false positives and then send the photos via Telegram.
+        After successfully sendind the photo it will also archive the photo
+        and remove it from the list.
+        """
+        logger.info("thread running")
+        while True:
+            if not self.queue.empty():
+                if network.state.current == 'armed':
+                    logger.debug('Running arp_ping_macs before sending photos...')
+                    network.arp_ping_macs()
+                    time.sleep(2)
+                    while True:
+                        if network.state.current != 'armed':
+                            self.clear_queue()
+                            break
+                        photo = self.queue.get()
+                        if photo is None:
+                            break
+                        logger.debug('Processing the photo: {0}'.format(photo))
+                        network.state.update_triggered(True)
+                        network.telegram_send_message('Motioned detected')
+                        if network.telegram_send_file(photo):
+                            self.queue.task_done()
+                else:
+                    logger.debug('Stopping photo processing as state is now {0} and clearing queue'.format(
+                        network.state.current))
+                    self.queue.queue.clear()
+            time.sleep(0.1)

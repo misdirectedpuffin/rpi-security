@@ -6,7 +6,8 @@ import logging.handlers
 import signal
 import sys
 import time
-from threading import Thread
+# from threading import Thread
+import asyncio
 
 import security
 from security.camera import Camera
@@ -77,61 +78,14 @@ if __name__ == "__main__":
     logger = setup_logging(debug_mode=False, log_to_stdout=args.debug)
 
     try:
-        network = Network(args.config_file, args.data_file)
-        camera = Camera(
-            network.photo_size,
-            network.gif_size,
-            network.motion_size,
-            network.camera_vflip,
-            network.camera_hflip,
-            network.motion_detection_setting,
-            network.camera_capture_length,
-            network.camera_mode
-        )
-        if network.debug_mode:
-            logger.handlers[0].setLevel(logging.DEBUG)
+        network = Network()
+        # camera = Camera()
+        # if camera.debug_mode:
+        #     logger.handlers[0].setLevel(logging.DEBUG)
     except Exception as exc:
         exit_error('Configuration error: {0}'.format(repr(exc)))
 
-    sys.excepthook = exception_handler
+    else:
+        loop = asyncio.get_event_loop()
+        
 
-    # Start the threads
-    telegram_bot_thread = Thread(
-        name='telegram_bot',
-        target=security.threads.telegram_bot,
-        args=(security, camera)
-    )
-    telegram_bot_thread.daemon = True
-    telegram_bot_thread.start()
-
-    monitor_alarm_state_thread = Thread(
-        name='monitor_alarm_state',
-        target=security.threads.monitor_alarm_state,
-        args=(security, camera)
-    )
-    monitor_alarm_state_thread.daemon = True
-    monitor_alarm_state_thread.start()
-
-    capture_packets_thread = Thread(
-        name='capture_packets',
-        target=security.threads.capture_packets,
-        args=(security,)
-    )
-    capture_packets_thread.daemon = True
-    capture_packets_thread.start()
-
-    process_photos_thread = Thread(
-        name='process_photos',
-        target=security.threads.process_photos,
-        args=(security, camera)
-    )
-    process_photos_thread.daemon = True
-    process_photos_thread.start()
-    signal.signal(signal.SIGTERM, exit_clean)
-    try:
-        logger.info("rpi-security running")
-        network.telegram_send_message('rpi-security running')
-        while True:
-            time.sleep(100)
-    except KeyboardInterrupt:
-        exit_clean()

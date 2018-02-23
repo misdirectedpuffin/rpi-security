@@ -4,11 +4,12 @@ import logging
 import os
 import sys
 import time
-from configparser import SafeConfigParser
+import _thread
 
 import yaml
 from netaddr import IPNetworkInterface
-from scapy.all import ARP, Ether, srp
+from scapy.all import ARP, Ether, srp, sniff
+from scapy.all import conf as scapy_conf
 from telegram import Bot as TelegramBot
 
 from netifaces import ifaddresses
@@ -16,100 +17,35 @@ from netifaces import ifaddresses
 from .exit_clean import exit_error
 from .security.state import State
 
+scapy_conf.promisc = 0
+scapy_conf.sniff_promisc = 0
+
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-
-
-
 logger = logging.getLogger()
 
 
-class NetworkInterface(object):
+class Network(object):
     """Reads and processed configuration, checks system settings."""
-    default_config = {
-        'camera_save_path': '/var/tmp',
-        'network_interface': 'mon0',
-        'packet_timeout': '700',
-        'debug_mode': 'False',
-        'pir_pin': '14',
-        'camera_vflip': 'False',
-        'camera_hflip': 'False',
-        'photo_size': '1024x768',
-        'gif_size': '1024x768',
-        'motion_size': '1024x768',
-        'motion_detection_setting': '60x10',
-        'camera_mode': 'gif',
-        'camera_capture_length': '3'
-    }
 
-    def __init__(self, config_file, data_file, interface='wlan0'):
-        self.config_file = config_file
-        self.data_file = data_file
-        # self.network_interface = network_interface
-        self.saved_data = self._read_data_file()
+    def __init__(self, interface='mon0', user_mac_address=None):
         self.interface = interface
-
+        self._mac_addresses = None
+        self._user_mac_address = None
         self._interface_mac_addr = None
         self._is_monitor_mode = None
         self._network_address = None
-        self._parse_config_file()
         self._check_system()
         self.state = State(self)
 
-        try:
-            self.bot = TelegramBot(token=self.telegram_bot_token)
-        except Exception as exc:
-            raise Exception('Failed to connect to Telegram with error: {0}'.format(repr(exc)))
-
-        logger.debug('Initialised: {0}'.format(vars(self)))
-
-    def _read_data_file(self):
-        """Reads a data file from disk."""
-        result = None
-        try:
-            with open(self.data_file, 'r') as stream:
-                result = yaml.load(stream) or {}
-        except Exception as exc:
-            logger.error('Failed to read data file {0}: {1}'.format(self.data_file, repr(exc)))
-        else:
-            logger.debug('Data file read: {0}'.format(self.data_file))
-        return result
-
-    def _parse_config_file(self):
-        def _str2bool(v):
-            return v.lower() in ("yes", "true", "t", "1")
-
-        cfg = SafeConfigParser(defaults=self.default_config)
-        cfg.read(self.config_file)
-
-        for k, v in cfg.items('main'):
-            setattr(self, k, v)
-
-        self.debug_mode = _str2bool(self.debug_mode)
-        self.camera_vflip = _str2bool(self.camera_vflip)
-        self.camera_hflip = _str2bool(self.camera_hflip)
-        self.pir_pin = int(self.pir_pin)
-        self.photo_size = tuple([int(x) for x in self.photo_size.split('x')])
-        self.gif_size = tuple([int(x) for x in self.gif_size.split('x')])
-        self.motion_size = tuple([int(x) for x in self.motion_size.split('x')])
-        self.motion_detection_setting = tuple([int(x) for x in self.motion_detection_setting.split('x')])
-        self.camera_capture_length = int(self.camera_capture_length)
-        self.camera_mode = self.camera_mode.lower()
-        self.packet_timeout = int(self.packet_timeout)
-        self.mac_addresses = self.mac_addresses.lower().split(',')
-
     def _arp_ping(self, mac_address):
         result = False
-        answered, unanswered = srp(
-            Ether(
-                dst=mac_address
-                )/ARP(pdst=self.network_address),
-                timeout=1,
-                verbose=False
-        )
-        if len(answered) > 0:
+        # Send and recieve packets.
+        ether = Ether(dst=mac_address)/ARP(pdst=self.network_address)
+        answered, unanswered = srp(ether, timeout=1, verbose=False)
+        if any(answered):
             for reply in answered:
                 if reply[1].hwsrc == mac_address:
-                    if type(result) is not list:
+                    if not isinstance(result, list):
                         result = []
                     result.append(str(reply[1].psrc))
                     result = ', '.join(result)
@@ -153,6 +89,17 @@ class NetworkInterface(object):
         # self._set_interface_mac_addr()
         # self._set_network_address()
 
+    @property
+    def mac_addresses(self):
+        if self._mac_addresses is None:
+            self._mac_addresses = self.config.mac_addresses.lower().split(',')
+        return self._mac_addresses
+
+    @property
+    def user_mac_address(self):
+        if self._user_mac_address is None:
+            self._user_mac_address = 'xx:ee:ii:ii:ee:ff:uu:99:ee:78'
+        return self._user_mac_address
 
     @property
     def is_valid(self):
@@ -176,7 +123,7 @@ class NetworkInterface(object):
             logger.exception(exc)
         else:
             return content.startswith('down')
-    
+
     @property
     def is_monitor_mode(self):
         """
@@ -245,3 +192,66 @@ class NetworkInterface(object):
                 )
                 raise Exception(message)
 
+    def capture_packets(self):
+        """
+        This function uses scapy to sniff packets for our MAC addresses and updates
+        the alarm state when packets are detected.
+        """
+        logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+        while True:
+            logger.info("Capturing packets")
+            try:
+                sniff(
+                    iface=self.interface,
+                    store=0,
+                    prn=self.update_time,
+                    filter=self.calculate_filter(self.mac_addresses)
+                )
+            except Exception as e:
+                logger.error(
+                    'Scapy failed to sniff packets with error {0}'.format(repr(e)))
+                _thread.interrupt_main()
+
+    def update_time(self, packet):
+        packet_mac = set(self.mac_addresses) & \
+            set([
+                packet[0].addr2,
+                packet[0].addr3
+            ])
+        packet_mac_str = list(packet_mac)[0]
+        self.state.update_last_mac(packet_mac_str) # store in db?
+        logger.debug('Packet detected from {0}'.format(packet_mac_str))
+
+    def calculate_filter(self):
+        mac_string = ' or '.join(self.mac_addresses)
+        filter_text = (
+            '((wlan addr2 ({0}) or wlan addr3 ({0})) '
+            'and type mgt subtype probe-req) '
+            'or (wlan addr1 {1} '
+            'and wlan addr3 ({0}))'
+        )
+        return filter_text.format(mac_string, self.user_mac_address)
+
+    def monitor_alarm_state(self, camera):
+        """
+        This function monitors and updates the alarm state, starts/stops motion detection when
+        state is armed and takes photos when motion detection is triggered.
+        """
+        logger.info("thread running")
+        while True:
+            time.sleep(0.1)
+            self.state.check()
+            if self.state.current == 'armed':
+                while not camera.lock.locked():
+                    camera.start_motion_detection()
+                    self.state.check()
+                    if self.state.current is not 'armed':
+                        break
+                    if camera.motion_detector.camera_trigger.is_set():
+                        camera.stop_motion_detection()
+                        camera.trigger_camera()
+                        camera.motion_detector.camera_trigger.clear()
+                else:
+                    camera.stop_motion_detection()
+            else:
+                camera.stop_motion_detection()
